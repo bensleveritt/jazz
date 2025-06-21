@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "Learn how to set up Jazz in your Svelte application."
 };
 
@@ -6,91 +6,230 @@ import { CodeGroup } from "@/components/forMdx";
 
 # Svelte Installation and Setup
 
-Jazz can be used with Svelte or in a SvelteKit app.
+Add Jazz to your SvelteKit application in minutes. This setup also works with standard Svelte apps and provides guidance for both client-side and SSR approaches.
 
-To add some Jazz to your Svelte app, you can use the following steps:
+Integrating Jazz with SvelteKit is straightforward. You'll define data schemas that describe your application's structure, then set up a provider that handles sync and storage. The whole process takes just three steps:
 
-1. Install Jazz dependencies
+1. [Install dependencies](#install-dependencies)
+2. [Write your schema](#write-your-schema)
+3. [Set up `<JazzProvider />`](#sveltekit-setup)
+
+Looking for complete examples? Check out our [example applications](/examples) for chat apps, collaborative editors, and more.
+
+## Install dependencies
+
+First, install the required packages:
 
 <CodeGroup>
-```sh
-pnpm install jazz-tools jazz-svelte
+```bash
+pnpm install jazz-svelte jazz-tools
 ```
 </CodeGroup>
 
-2. Write your schema
+## Write your schema
 
-See the [schema docs](/docs/schemas/covalues) for more information.
+Define your data schema using [CoValues](/docs/schemas/covalues) from `jazz-tools`.
 
 <CodeGroup>
-```ts
+```ts twoslash
 // src/lib/schema.ts
-import { Account, Profile, coField } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyProfile extends Profile {
-  name = coField.string;
-  counter = coField.number; // This will be publically visible
-}
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 
-export class MyAccount extends Account {
-  profile = coField.ref(MyProfile);
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
 
-  // ...
-}
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.map({ name: z.string() }),
+});
 ```
 </CodeGroup>
 
-3. Set up the Provider in your root layout
+See [CoValues](/docs/schemas/covalues) for more information on how to define your schema.
+
+## SvelteKit Setup
+
+Set up Jazz in your root layout to connect to the Jazz network and register your data schema:
 
 <CodeGroup>
-```svelte
+```svelte twoslash
 <!-- src/routes/+layout.svelte -->
- <script lang="ts" module>
-  // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
-  declare module 'jazz-svelte' {
-    interface Register {
-      Account: MyAccount;
-    }
-  }
-</script>
-
 <script lang="ts">
   import { JazzProvider } from 'jazz-svelte';
+  import { MyAppAccount } from '$lib/schema';
 
-  // Example configuration for authentication and peer connection
-  let sync = { peer: "wss://cloud.jazz.tools/?key=you@example.com" };
-  let AccountSchema = MyAccount;
+  const sync = { peer: "wss://cloud.jazz.tools/?key=you@example.com" };
 </script>
 
-<JazzProvider {sync} {AccountSchema}>
-  <App />
+<JazzProvider {sync} AccountSchema={MyAppAccount}>
+  <slot />
 </JazzProvider>
 ```
 </CodeGroup>
 
-4. Use Jazz hooks in your components
+This setup handles:
+- Connection to the Jazz sync server
+- Schema registration for type-safe data handling
+- Local storage configuration
+
+With this in place, you're ready to start using Jazz stores in your components. [Learn how to access and update your data](/docs/using-covalues/subscription-and-loading#subscription-hooks).
+
+## Using Jazz in Components
+
+Once your provider is set up, use Jazz stores in your Svelte components:
 
 <CodeGroup>
 ```svelte
 <!-- src/routes/+page.svelte -->
 <script lang="ts">
   import { useCoState, useAccount } from 'jazz-svelte';
-  import { MyProfile } from './schema';
+  import { TodoItem } from '$lib/schema';
 
   const { me } = useAccount();
-
-  const profile = $derived(useCoState(MyProfile, me._refs.profile.id));
-
-  function increment() {
-    if (!profile.current) return;
-    profile.current.counter = profile.current.counter + 1;
+  
+  // Access the user's todos list
+  const todos = $derived(me?.root?.todos);
+  
+  function addTodo() {
+    if (!todos) return;
+    
+    const newTodo = TodoItem.create({
+      title: "New todo",
+      completed: false,
+    }, { owner: me });
+    
+    todos.push(newTodo);
   }
 </script>
 
-<button on:click={increment}>
-  Count: {profile.current?.counter}
-</button>
+{#if todos}
+  <ul>
+    {#each todos as todo (todo?.id)}
+      {#if todo}
+        <li>
+          <input 
+            type="checkbox" 
+            bind:checked={todo.completed}
+          />
+          <input 
+            type="text" 
+            bind:value={todo.title}
+          />
+        </li>
+      {/if}
+    {/each}
+  </ul>
+{/if}
+
+<button onclick={addTodo}>Add Todo</button>
 ```
 </CodeGroup>
 
-For a complete example of Jazz with Svelte, check out our [file sharing example](https://github.com/gardencmp/jazz/tree/main/examples/file-share-svelte) which demonstrates, Passkey authentication, file uploads and access control.
+## Client-side Only (Recommended)
+
+The setup above works perfectly for client-side SvelteKit applications. The `<JazzProvider />` in your `+layout.svelte` handles everything automatically.
+
+### SSR Support (Experimental)
+
+For server-side rendering, Jazz offers experimental approaches similar to other frameworks:
+
+- Pure SSR in `+page.server.ts`
+- Hybrid SSR + Client Hydration
+
+#### Pure SSR
+
+Use Jazz in server load functions by directly loading data with `CoValue.load()`:
+
+<CodeGroup>
+```ts
+// src/routes/+page.server.ts
+import type { PageServerLoad } from './$types';
+import { TodoItem } from '$lib/schema';
+
+export const load: PageServerLoad = async () => {
+  // Load data directly on the server
+  const todos = await TodoList.load(todoListId);
+  
+  return {
+    todos: todos ? Array.from(todos.values()).filter(Boolean) : []
+  };
+};
+```
+</CodeGroup>
+
+This works well for public data accessible to the server account.
+
+#### Hybrid SSR + Client Hydration
+
+For more complex cases, you can pre-render on the server and hydrate on the client:
+
+1. Load initial data in your server load function:
+
+<CodeGroup>
+```ts
+// src/routes/+page.server.ts
+import type { PageServerLoad } from './$types';
+import { TodoList } from '$lib/schema';
+
+export const load: PageServerLoad = async () => {
+  const initialTodos = await TodoList.load(todoListId);
+  
+  return {
+    initialTodos: initialTodos ? Array.from(initialTodos.values()).filter(Boolean) : []
+  };
+};
+```
+</CodeGroup>
+
+2. Create a component that handles both initial and live data:
+
+<CodeGroup>
+```svelte
+<!-- src/routes/+page.svelte -->
+<script lang="ts">
+  import { useCoState } from 'jazz-svelte';
+  import type { PageData } from './$types';
+  
+  export let data: PageData;
+  
+  // Get live data once client loads
+  const liveList = useCoState(TodoList, todoListId);
+  
+  // Use server data until client data is available
+  $: displayTodos = $liveList?.filter(Boolean) || data.initialTodos;
+</script>
+
+<ul>
+  {#each displayTodos as todo (todo.id)}
+    <li>{todo.title}</li>
+  {/each}
+</ul>
+```
+</CodeGroup>
+
+This approach gives you fast initial loading with server rendering, plus real-time updates on the client.
+
+## Quick Start with create-jazz-app
+
+Create a new SvelteKit app with Jazz pre-configured:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest my-app --template svelte
+```
+</CodeGroup>
+
+This creates a new SvelteKit application with Jazz installed and configured, including example schemas and components.
+
+## Further Reading
+
+- [Schemas](/docs/schemas/covalues) - Learn about defining your data model
+- [Provider Configuration](/docs/project-setup/providers) - Learn about other configuration options for Providers
+- [Authentication](/docs/authentication/overview) - Set up user authentication
+- [Sync and Storage](/docs/sync-and-storage) - Learn about data persistence
